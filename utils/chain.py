@@ -1,9 +1,9 @@
 import json
 import os
 import time
-import copy
 from tqdm import tqdm
 from utils.models import llm_init, llm_generate
+from config import IMAGE_FOLDER
 
 plan_full_demo_simple = """
 
@@ -147,38 +147,6 @@ This is a fact verification task. Given extracted information from table, your g
 Provide an answer in the JSON structure, using the format {"answer": True} or {"answer": False}.
 """
 
-_____tfv_feedback_prompt = """
-You are a Visual-Language Answer Evaluator tasked with validating answers against visual evidence (e.g., a table image). 
-Your task is as follows:
-
-### Step 1: Re-evaluate the Given Answer  
-- Carefully analyze the table in the provided image.  
-- Verify if the given answer matches the information in the table.  
-
-### Step 2: Explain Your Reasoning  
-- If the answer is correct:  
-   1. Confirm which specific part of the table supports the answer.  
-   2. Highlight the exact data or evidence (e.g., row, column, value) from the table that supports your conclusion.  
-   - Output: "correct. Evidence: [EXPLAIN DATA]."  
-
-- If the answer is incorrect:  
-   1. Identify the part of the table that disproves the answer.  
-   2. Explain the discrepancy between the given answer and the actual evidence.  
-   - Output: "incorrect. Reason: [EXPLAIN ERROR OR DISCREPANCY]."  
-
-### Example:  
-Image: A table showing "Year" and "Sales Data."  
-Statement: "Sales in 2023 exceeded 1000 units."  
-Answer: True
-
-- If Table shows "Sales in 2023 = 980":  
-   Output: "incorrect. Reason: Sales in 2023 are 980, which is less than 1000."  
-- If Table shows "Sales in 2023 = 1200":  
-   Output: "correct. Evidence: Sales in 2023 are 1200, which exceeds 1000."
-
-Carefully re-check all relevant parts of the table before providing your response.
-"""  
-
 # answer = entailed / refuted 
 tfv_feedback_prompt = """
 You are an expert Visual-Language Answer Validator. 
@@ -188,32 +156,24 @@ Please provide the related context in the image of table, and don't repeat the s
 
 
 
-def get_table_info(sample, image_folder):
+def get_table_info(sample):
     table_info = sample
-    table_info["image_path"] = os.path.join(image_folder, sample["image_id"]) + ".jpg"
+    table_info["image_path"] = os.path.join(IMAGE_FOLDER, sample["image_id"]) + ".jpg"
     # table_info["original_query"] = sample['original_query']
     # table_info["input"] = sample["input"]
     return table_info
 
 
-
-def generate_prompt_for_stage(
+def run_stage(
     sample,
-    image_folder,
     llm,
     task_type,
     debug=False,
-    llm_options=None,
-    strategy="top",
-    stage="perception",
+    stage="cot",
     log = None
 ):
-    table_info = get_table_info(sample, image_folder)
-    #act_chain = table_info["act_chain"]
-
-    # if debug:
-    #     print("Table Info: ", table_info, flush=True)
-        
+    
+    table_info = get_table_info(sample)
     prompt = ""
     
     # ----------------- TQA -----------------
@@ -237,30 +197,24 @@ def generate_prompt_for_stage(
             prompt += "Question: " + table_info["original_query"] + "\n"
             prompt += "Extracted information: "
             response = llm_generate(llm, prompt, table_info["image_path"])
-            
             if debug:
                 print("Perception: ", response, flush=True)
-                
-        if stage == "summary":
-            #prompt += "Information extracted from table:" 
-            prompt = summary_prompt 
+
+        if stage == "reasoning":
+            prompt = summary_prompt
             prompt += "Information extracted from table:" + log[-1]["response"] + "\n\n"
-            #prompt += log[-1]["response"] + "\n\n"
             prompt += "Question: " + table_info["original_query"] + "\n"
-
             response = llm_generate(llm, prompt,)
-
             if debug:
                 print("Reasoning: ", response, flush=True)
         
-        if stage == "feedback":
-            prompt += feedback_prompt.format(question=table_info["original_query"],answer=log[-1]["response"]) + "\n\n"
+        if stage == "reflection":
+            prompt += feedback_prompt.format(question=table_info["original_query"],answer = log[-1]["response"]) + "\n\n"
             # prompt += "Question: " + table_info["original_query"] + "\n"
             # prompt += "Answer: " + log[-1]["response"] + "\n"
-        
             response = llm_generate(llm, prompt, table_info["image_path"])
             if debug:
-                print("Feedback: ", response, flush=True)
+                print("Reflection: ", response, flush=True)
                 pass
             
         if stage == "aggregation_reasoning":
@@ -302,7 +256,7 @@ def generate_prompt_for_stage(
                 print("Statement: ", table_info["original_query"], flush=True)
                 print("Perception: ", response, flush=True)
                 
-        if stage == "summary":
+        if stage == "reasoning":
             prompt += tfv_summary_prompt + "\n"
             prompt += "Information extracted from table:" + log[-1]["response"] + "\n\n"
             prompt += "Statement: " + table_info["original_query"] + "\n"
@@ -312,7 +266,7 @@ def generate_prompt_for_stage(
             if debug:
                 print("Summary: ", response, flush=True)
         
-        if stage == "feedback":
+        if stage == "reflection":
             ans = "True" if "True" in log[-1]["response"] else "False"
             prompt += tfv_feedback_prompt.format(statement=table_info["original_query"], answer=ans) + "\n\n"
             #prompt += "Information extracted from table: " + log[-2]["response"] + "\n\n"
@@ -349,50 +303,47 @@ def generate_prompt_for_stage(
 
 
 
+
 def dynamic_chain_exec_one_sample(
     sample,
-    image_folder,
     llm,
-    llm_options=None,
-    task_type="TQA", # TQA, TFV
-    strategy="top",
+    task_type,  # TQA, TFV
     debug=False,
-    operation_parameter_dict=None,
     max_iteration=3
 ):
+    """
+    执行动态推理链的核心函数。通过多阶段的推理过程来分析表格并得出答案。
+    perception -> reasoning ->  reflection 
+    推理流程：
+    1. Perception（感知）: 从表格中提取相关信息
+    2. Reasoning（推理）: 基于提取的信息生成初步答案
+    3. 迭代优化（最多max_iteration次）:
+        - Reflection（反思）: 对当前答案进行评估和反思
+        - Aggregation Reasoning（聚合推理）: 综合所有信息重新生成答案
+        - 如果答案稳定（与上一轮相同），则提前结束迭代
+    """
 
-    # perception -> reasoning ->  feedback
     dynamic_chain_log = []
     last_answer = None
 
-    current_sample = copy.deepcopy(sample)
-    #current_sample = sample
-    #if dynamic_chain_log == []:
-    
-    # perception
-    response, log = generate_prompt_for_stage(
-        current_sample,
-        image_folder,
+    # Perception
+    response, log = run_stage(
+        sample,
         llm=llm,
-        llm_options=llm_options,
-        strategy=strategy,
         debug=debug,
         task_type=task_type,
         stage="perception",
         log = dynamic_chain_log
         )
     dynamic_chain_log.append(log)
-    
-    # summary
-    answer, log = generate_prompt_for_stage(
-        current_sample,
-        image_folder,
+
+    # Reasoning
+    answer, log = run_stage(
+        sample,
         llm=llm,
-        llm_options=llm_options,
         task_type=task_type,
-        strategy=strategy,
         debug=debug,
-        stage="summary",
+        stage="reasoning",
         log = dynamic_chain_log
         )
     dynamic_chain_log.append(log)
@@ -401,27 +352,21 @@ def dynamic_chain_exec_one_sample(
     # Loop until the answer is stable
     for i in range(max_iteration):
         # feedback
-        feedback, log = generate_prompt_for_stage(
-            current_sample,
-            image_folder,
+        feedback, log = run_stage(
+            sample,
             llm=llm,
-            llm_options=llm_options,
             task_type=task_type,
-            strategy=strategy,
             debug=debug,
-            stage="feedback",
+            stage="reflection",
             log = dynamic_chain_log
             )
         dynamic_chain_log.append(log)
         
         # aggregation_reasoning
-        answer, log = generate_prompt_for_stage(
-            current_sample,
-            image_folder,
+        answer, log = run_stage(
+            sample,
             llm=llm,
-            llm_options=llm_options,
             task_type=task_type,
-            strategy=strategy,
             debug=debug,
             stage="aggregation_reasoning",
             log = dynamic_chain_log
@@ -435,5 +380,5 @@ def dynamic_chain_exec_one_sample(
         
     final_answer = answer
 
-    return feedback, final_answer, dynamic_chain_log
+    return final_answer, dynamic_chain_log
 

@@ -2,8 +2,8 @@ import json
 import os
 import time
 from tqdm import tqdm
-from utils.models import llm_init, llm_generate
-from utils.chain import run_stage
+from utils.models import llm_init
+from utils.chain import dynamic_chain_exec_one_sample
 from utils.evaluation import evaluate_tqa_tfv_one_item
 from config import DATASET_PATH, IMAGE_FOLDER, QWEN_MODEL_PATH
 from utils.data_utils import filter_samples
@@ -25,7 +25,7 @@ if __name__ == "__main__":
     model_path = QWEN_MODEL_PATH
     model_name = model_path.split("/")[-1]
 
-    method = "cot" # naive / cot
+    method = "peer"
     
     # task_type = "TQA" 
     # dataset_name = "TAT-QA" # TABMWP / WTQ  / HiTab / TAT-QA
@@ -38,8 +38,8 @@ if __name__ == "__main__":
     sample_ratio = 1.0  # 可以改为任意0到1之间的值，比如0.5表示使用50%的样本
 
     # log file
-    log_path = "./logs/" + time.strftime("%Y%m%d-%H%M%S") + "_" +\
-        model_name + "_" + method + "_" + task_type + "_" + dataset_name + ".jsonl"
+    log_path = "./logs/" + time.strftime("%Y%m%d-%H%M%S") + "_" + model_name + "_" + method + "_" + \
+        task_type + "_" + dataset_name + ".jsonl"
     answer_file = open(log_path, "w")
 
     # load samples
@@ -47,49 +47,52 @@ if __name__ == "__main__":
         samples = json.load(f)
     print("Total samples: ", len(samples))
     # only hold samples for TQA and TFV
-    samples = [s for s in samples if s["task_type"] in ["TQA", "TFV"]]
-    #samples = [s for s in samples if s["item_id"] == "HiTab_c489ba620d3a710872992235c7631247"]
+    #samples = [s for s in samples if s["task_type"] in ["TQA", "TFV"]]
+    #samples = [s for s in samples if s["dataset_name"] in ["TabFact", "TABMWP", "InfoTabs" "WTQ", "HiTab", "TAT-QA"]]
     print("Filtered TQA and TFV samples: ", len(samples))
     samples = filter_samples(samples, task_type, dataset_name, sample_ratio=sample_ratio)
-    #print("Filtered samples: ", len(samples))
 
-    demo = samples[0]
+    # optional shuffle
+    # random.shuffle(samples)
 
     llm = llm_init(model_path)
-    
-    for i, sample in enumerate(tqdm(samples)):
-        response, log = run_stage(
-            sample,
-            llm=llm,
-            task_type=sample["task_type"],
-            debug=False,
-            stage=method,
-            )
-        
-        is_correct,_ = evaluate_tqa_tfv_one_item(response, sample["answer_list"], sample["task_type"])
 
-        # print current results
-        print("Question: ",sample['original_query'], flush=True)
-        print("Output: ",response, flush=True)
-        print("Answer: ", sample["answer_list"], flush=True)
+    for i, sample in enumerate(tqdm(samples)):
+        answer, dynamic_chain_log = dynamic_chain_exec_one_sample(
+            sample, llm, task_type=sample["task_type"], debug=True
+        )
+
+        answer_history = [log["response"] for log in dynamic_chain_log if log.get("stage") in ["summary", "aggregation_reasoning"]]
+
+        # evaluate final answer
+        is_correct,_ = evaluate_tqa_tfv_one_item(answer, sample["answer_list"], sample["task_type"])
+
+        # print results
+        print("Question: ", sample.get('original_query'), flush=True)
+        print("Output: ", answer, flush=True)
+        print("Correct Answer: ", sample.get("answer_list"), flush=True)
         print("is_correct: ", is_correct, flush=True)
-        
+
+        # save to file
         answer_file.write(json.dumps(
             {
-                "item_id": sample["item_id"],
-                "image": sample["image_id"],
-                "original_query": sample["original_query"],
-                "output": response,
-                "label": sample["answer_list"],
+                "item_id": sample.get("item_id"),
+                "image": sample.get("image_id"),
+                "original_query": sample.get("original_query"),
+                "output": answer,
+                "output_history": answer_history,
+                "label": sample.get("answer_list"),
                 "is_correct": is_correct,
-                "task_type": sample["task_type"],
-                "dataset_name": sample["dataset_name"],
+                "task_type": sample.get("task_type"),
+                "dataset_name": sample.get("dataset_name"),
                 #"feedback": feedback,
-                }) + "\n")
+            }
+        ) + "\n")
         answer_file.flush()
+
         # Update statistics
-        task = sample["task_type"]
-        dataset = sample["dataset_name"]
+        task = sample.get("task_type")
+        dataset = sample.get("dataset_name")
         
         results[task]['total'] += 1
         if is_correct:

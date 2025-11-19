@@ -2,7 +2,10 @@
 
 
 ## Abstract
-Table understanding aims to extract structured knowledge and answer table-related queries. Large Vision-Language Models (LVLMs), with their cross-modal capabilities, offer a promising avenue for directly understanding tables by leveraging visual information. However, their pre-training primarily targets general vision-language tasks, leading to underperformance in specialized table-based tasks. Existing solutions rely heavily on fine-tuning with large-scale labeled tabular data, leading to high computational costs and struggles to generalize across diverse table formats and unseen domains. This highlights the urgent need for more efficient and generalizable approaches to table understanding. In this paper, we explore and propose a training-free self-improving paradigm to enhance LVLMs' table understanding. Inspired by human cognition, our approach includes three key stages: *Perception*, *Reasoning*, and *Reflection*. Specifically, in the Perception stage, LVLMs extract query-relevant textual evidence from table images. The Reasoning stage summarizes this evidence to produce an initial answer. The Reflection stage revisits the query and initial answer to identify missing or supplementary evidence for further reasoning the answer. By alternating between Reflection and Reasoning, the model autonomously mitigates issues like information omissions and ensures robust responses. Extensive experiments on six table benchmarks validate the effectiveness, achieving averaging 14% relative improvement on Qwen2-VL-7B and 28% on Llama-3.2-11B-Vision.
+Recent advances in Large Vision-Language Models (LVLMs) have sparked growing interest in multimodal table understanding, as table images are widely available in the real world. However, existing approaches largely rely on costly instruction tuning, which limits scalability across diverse LVLMs and practical deployment, especially with black-box APIs such as GPT-4. 
+To address these challenges, we propose a training-free, self-improving prompting framework to enhance LVLMs’ table understanding ability. Inspired by Dual-system theory, we devise three key inference stages—**Perception**, **Reasoning**, and **Reflection**—that progressively seek evidence in table images and iteratively refine derived answers. This staged process emulates deliberate System 2 reasoning, thereby reducing issues such as information omission and hallucination. 
+
+
 
 
 
@@ -16,7 +19,7 @@ Refer to the multimodal table understanding dataset in the [MMTab Dataset](https
 
 - PEER
 ```
-python run_autotab.py
+python run_peer.py
 ```
 - Base & CoT
 ```
